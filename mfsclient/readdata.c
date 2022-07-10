@@ -91,9 +91,11 @@ typedef struct cblock_s {
 } cblock;
 */
 
-// #define RDEBUG 1
+#define RDEBUG 0
 
-#define MAXREQINQUEUE 16
+#define MAXREQINQUEUE 64
+
+#define MAXREQSFORRANGE 1024
 
 enum {NEW,INQUEUE,BUSY,REFRESH,BREAK,FILLED,READY,NOTNEEDED};
 
@@ -274,7 +276,7 @@ static inline rrequest* read_new_request(inodedata *ind,uint64_t *offset,uint64_
 	rreq = malloc(sizeof(rrequest));
 	passert(rreq);
 #ifdef RDEBUG
-	fprintf(stderr,"%.6lf: inode: %"PRIu32" - new request: chindx: %"PRIu32" chunkoffset: %"PRIu64" chunkleng: %"PRIu32"\n",monotonic_seconds(),ind->inode,chindx,chunkoffset,chunkleng);
+	fprintf(stderr,"%.6lf: inode: %"PRIu32" - new request: chindx: %"PRIu32" chunkoffset: %"PRIu64" chunkleng: %"PRIu32" inqueue:%d\n",monotonic_seconds(),ind->inode,chindx,chunkoffset,chunkleng,ind->inqueue);
 #endif
 	rreq->ind = ind;
 	rreq->modified = monotonic_seconds();
@@ -319,6 +321,9 @@ static inline uint64_t read_delete_request(rrequest *rreq) {
 	uint64_t rbuffsize;
 #else
 static inline void read_delete_request(rrequest *rreq) {
+#endif
+#ifdef RDEBUG
+	fprintf(stderr,"%.6lf: read_delete_request (rreq: %"PRIu64":%"PRIu64"/%"PRIu32") ; rreq->mode: %s\n",monotonic_seconds(),rreq->offset,rreq->offset+rreq->leng,rreq->leng,read_data_modename(rreq->mode));
 #endif
 	*(rreq->prev) = rreq->next;
 	if (rreq->next) {
@@ -1180,6 +1185,9 @@ void* read_worker(void *arg) {
 					}
 					lastsend = now;
 				}
+#ifdef RDEBUG
+				fprintf(stderr,"%.6lf: readworker inode: %"PRIu32" ; rreq: %"PRIu64":%"PRIu64"/%"PRIu32" ; sent: %d tot:%d\n",monotonic_seconds(),inode,rreq->offset,rreq->offset+rreq->leng,rreq->leng,i,sent);
+#endif
 			}
 
 			pfd[0].events = POLLIN | ((tosend>0)?POLLOUT:0);
@@ -1752,7 +1760,7 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 	uint64_t firstbyte;
 	uint64_t lastbyte;
 	uint32_t cnt;
-	uint32_t edges,i,reqno;
+	uint32_t edges,i,j,reqno;
 	uint8_t added,raok;
 	uint64_t *etab,*ranges;
 	int status;
@@ -1814,7 +1822,7 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 			ind->seqdata = 0;
 		}
 #ifdef RDEBUG
-		fprintf(stderr,"%.6lf: read_data: inode: %"PRIu32" seqdata: %"PRIu32" offset: %"PRIu64" ind->lastoffset: %"PRIu64" ind->readahead: %u reqbufftotalsize:%"PRIu64"\n",monotonic_seconds(),ind->inode,ind->seqdata,offset,ind->lastoffset,ind->readahead,rbuffsize);
+		fprintf(stderr,"%.6lf: read_data: inode: %"PRIu32" seqdata: %"PRIu32" offset: %"PRIu64" size: %"PRIu64" ind->lastoffset: %"PRIu64" ind->readahead: %u reqbufftotalsize:%"PRIu64"\n",monotonic_seconds(),ind->inode,ind->seqdata,offset,(uint64_t)*size,ind->lastoffset,ind->readahead,rbuffsize);
 #endif
 
 		firstbyte = offset;
@@ -1850,7 +1858,7 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 #endif
 				read_rreq_not_needed(rreq);
 				reqno--;
-			} else if ((lastbyte <= rreq->offset || firstbyte >= rreq->offset+rreq->leng) && reqno>3) {
+			} else if ((lastbyte <= rreq->offset || firstbyte >= rreq->offset+rreq->leng) && reqno>MAXREQSFORRANGE) {
 #ifdef RDEBUG
 				fprintf(stderr,"%.6lf: read_data: inode: %"PRIu32" - too many requests: free rreq (%"PRIu64":%"PRIu64"/%"PRIu32" ; lcnt:%u ; mode:%s)\n",monotonic_seconds(),ind->inode,rreq->offset,rreq->offset+rreq->leng,rreq->leng,rreq->lcnt,read_data_modename(rreq->mode));
 #endif
@@ -1859,6 +1867,9 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 			}
 			rreq = rreqn;
 		}
+#ifdef RDEBUG
+		fprintf(stderr,"%.6lf: read_data: inode: %"PRIu32" status: reqno:%d\n",monotonic_seconds(),ind->inode,reqno);
+#endif
 
 		// split read block by request edges
 		ranges = pthread_getspecific(rangesstorage);
@@ -1958,8 +1969,9 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 #endif
 										read_new_request(ind,&blockstart,ind->fleng);
 									}
-								// and another one if necessary
-									if ((blockstart % MFSCHUNKSIZE) == 0 && rreq->next!=NULL && rreq->next->next==NULL && rbuffsize<maxreadaheadsize) {
+								// and many more
+									for (j = 0; j < MAXREQSFORRANGE; j++) { // Not indented properly (to not show body as changes).
+									if ((blockstart % MFSCHUNKSIZE) == 0 && rreq->next!=NULL && reqno < MAXREQSFORRANGE && rbuffsize<maxreadaheadsize) {
 										blockend = blockstart + (readahead_leng * (1<<((ind->readahead-1)*2)));
 										sassert(blockend>blockstart);
 										raok = 1;
@@ -1982,7 +1994,9 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 #endif
 												read_new_request(ind,&blockstart,ind->fleng);
 											}
+											reqno++;
 										}
+									}
 									}
 								}
 							}
@@ -2027,6 +2041,7 @@ int read_data(void *vid, uint64_t offset, uint32_t *size, void **vrhead,struct i
 #endif
 								(void)read_new_request(ind,&blockstart,ind->fleng);
 							}
+							reqno++;
 						}
 						break;
 					}

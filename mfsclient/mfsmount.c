@@ -1955,10 +1955,11 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr,"read ahead length too low (%u B) - increased to 128 KiB\n",mfsopts.readaheadleng);
 		mfsopts.readaheadleng=0x20000;
 	}
-	if (mfsopts.readaheadleng>0x200000) {
-		fprintf(stderr,"read ahead length too big (%u B) - decresed to 2 MiB\n",mfsopts.readaheadleng);
-		mfsopts.readaheadleng=0x200000;
+	if (mfsopts.readaheadleng>0x2000000) {
+		fprintf(stderr,"read ahead length too big (%u B) - decresed to 32 MiB\n",mfsopts.readaheadleng);
+		mfsopts.readaheadleng=0x2000000;
 	}
+	fprintf (stderr, "Using readaheadleng=%d.\n", mfsopts.readaheadleng);
 	if (mfsopts.readaheadtrigger==0) {
 		mfsopts.readaheadtrigger=mfsopts.readaheadleng*10;
 	}
